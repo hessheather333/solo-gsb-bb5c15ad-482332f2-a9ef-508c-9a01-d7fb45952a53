@@ -176,6 +176,61 @@ class BeamEvaluationOut(BaseModel):
     rays: list[BeamRayOut]
 
 
+class ApertureInterfaceIn(InterfaceIn):
+    """有限口径界面：在普通界面基础上增加正的口径半宽。
+
+    有效区以 point 为中心，沿法线逆时针旋转 90° 所得单位切向量展开，
+    切向偏移绝对值不大于半宽（边界算通过）时才允许折射。
+    """
+
+    half_width: float = Field(gt=0, description="口径半宽，必须为正")
+
+
+class ApertureBeamRequest(BaseModel):
+    """有限口径光束评估请求：沿用光束评估的扇形采样与观察线，界面另带口径半宽。"""
+
+    start: Vec2
+    center_direction: Vec2
+    half_angle_deg: float = Field(gt=0, lt=90, description="对称半角（度），0<a<90")
+    sample_count: int = Field(ge=2, le=101, description="采样数，2～101（含端点）")
+    n_start: float = Field(gt=0, description="起始介质折射率，必须为正")
+    interfaces: list[ApertureInterfaceIn] = Field(default_factory=list)
+    observation_line: ObservationLineIn
+
+    @field_validator("center_direction")
+    @classmethod
+    def direction_nonzero(cls, v: Vec2) -> Vec2:
+        if math.hypot(v.x, v.y) < _EPS:
+            raise ValueError("中心方向不能为零向量")
+        return v
+
+
+class ApertureBeamRayOut(BaseModel):
+    """单条光线的有限口径追迹结果。
+
+    failed_interface_index / tangent_offset 仅在首个失败界面处有值；
+    完整穿过所有界面或无失败界面时二者为 null（无交点时偏移亦为 null）。
+    """
+
+    emission_angle_deg: float
+    direction: Vec2
+    status: str
+    reason: str | None
+    failed_interface_index: int | None
+    tangent_offset: float | None
+    observation_point: Vec2 | None
+
+
+class ApertureBeamEvaluationOut(BaseModel):
+    half_angle_deg: float
+    sample_count: int
+    ray_count: int
+    hit_count: int
+    centroid: Vec2 | None
+    rms_radius: float | None
+    rays: list[ApertureBeamRayOut]
+
+
 class PowerRequest(BeamRequest):
     """功率评估请求：在光束请求基础上增加 s 偏振入射功率占比。
 

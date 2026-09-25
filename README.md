@@ -31,6 +31,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | GET | `/api/traces/{trace_id}/segments/{seg_index}` | 按编号查询某一段的交点与方向 |
 | POST | `/api/traces/compare` | 按 seg_index 对齐比较两条已保存追迹的状态与分段，返回等价性与全部字段差异（只读，不入库） |
 | POST | `/api/beam-evaluations` | 扇形采样多条光线逐条追迹，返回各光线发射角、状态、观察线交点及质心/RMS（不入库） |
+| POST | `/api/aperture-beam-evaluations` | 扇形采样光线逐界面顺序追迹**有限口径**界面（每界面另收口径半宽），交点越出口径即在首个失败界面终止，返回每条光线的状态、首个失败界面序号、该处切向偏移与光斑统计（不入库） |
 | POST | `/api/power-evaluations` | 复用光束采样与追迹，按菲涅耳公式逐界面累乘 s/p 透过率，返回各光线功率与功率加权质心（不入库） |
 | POST | `/api/wavefront-evaluations` | 复用光束采样与追迹，计算各光线到观察线的光程，对 (切向偏移, 光程) 做等权最小二乘直线拟合，返回截距、斜率、逐光线残差与残差 RMS（不入库） |
 | POST | `/api/aim-solutions` | 扫描发射角并对偏差异号区间二分，求解命中观察线目标偏移量的光线（不入库） |
@@ -193,6 +194,86 @@ curl -X POST http://localhost:8000/api/beam-evaluations \
 - `ray_count`：实际追迹的光线数（等于 `sample_count`）；`hit_count`：观察线上存在有效前向交点的光线数。
 - `rays[]` 按发射角从 `-a` 到 `+a` 排列，每条含 `emission_angle_deg`（相对中心方向的发射角，度）、`direction`（归一化后的实际发射方向）、`status` / `reason`（复用单光线追迹的状态与停止原因）、`observation_point`（观察线前向交点，无效时为 `null`）。
 - 无任何命中时：`hit_count` 为 0，`centroid` 与 `rms_radius` 均为 `null`。
+
+## 有限口径光束评估
+
+`POST /api/aperture-beam-evaluations` 沿用光束评估的**扇形采样、顺序界面追迹与观察线输入**（起点、中心方向、对称半角、采样数、起始折射率、顺序界面、观察线），区别在于每个界面在 `point` / `normal` / `n_next` 之外**另收正的口径半宽** `half_width`（> 0）。该接口为即时计算，结果不写入数据库。
+
+- **有效区定义**：界面有效区以 `point` 为中心，沿单位法线**逆时针旋转 90°** 所得单位切向量 `t = (-ny, nx)` 展开，即有效区为 `point + s·t`、`|s| ≤ half_width` 的线段。
+- **折射条件**：光线与界面直线存在**前向交点**后，计算交点的切向偏移 `offset = (交点 − point) · t`；仅当 `|offset| ≤ half_width`（**边界算通过**）时才允许折射，否则在该界面终止，状态为 `aperture_blocked`。
+- **顺序终止**：逐条光线按界面顺序处理，**前向交点不存在**（`no_intersection`，平行或交点在反方向）、**越出口径**（`aperture_blocked`）或**全反射**（`total_internal_reflection`）均在**首个失败界面**终止，不再计算后续界面；失败时返回该界面序号 `failed_interface_index`（从 0 起）与该处切向偏移 `tangent_offset`，**无交点时偏移为 `null`**；完整穿过全部界面时二者均为 `null`。
+- **光斑统计**：仅**完整通过全部界面**（`completed`）且**出射段前向命中观察线**的光线参与命中数、质心与 RMS 半径统计（定义同光束评估）；完成追迹但与观察线平行或交点在反方向的光线 `observation_point` 为 `null`，不参与统计。无命中时 `hit_count` 为 0、`centroid` 与 `rms_radius` 为 `null`。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/aperture-beam-evaluations` | 扇形采样光线逐界面追迹有限口径界面，返回各光线状态、首个失败界面序号与切向偏移、观察线交点及质心/RMS |
+
+### 有限口径光束评估请求示例
+
+```bash
+curl -X POST http://localhost:8000/api/aperture-beam-evaluations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start": {"x": 0, "y": 0},
+    "center_direction": {"x": 1, "y": 0},
+    "half_angle_deg": 30,
+    "sample_count": 3,
+    "n_start": 1.0,
+    "interfaces": [
+      {"point": {"x": 2, "y": 0}, "normal": {"x": 1, "y": 0}, "n_next": 1.5, "half_width": 0.5},
+      {"point": {"x": 4, "y": 0}, "normal": {"x": 1, "y": 0}, "n_next": 1.0, "half_width": 5.0}
+    ],
+    "observation_line": {"point": {"x": 10, "y": 0}, "normal": {"x": 1, "y": 0}}
+  }'
+```
+
+### 有限口径光束评估响应说明
+
+```json
+{
+  "half_angle_deg": 30.0,
+  "sample_count": 3,
+  "ray_count": 3,
+  "hit_count": 1,
+  "centroid": {"x": 10.0, "y": 0.0},
+  "rms_radius": 0.0,
+  "rays": [
+    {
+      "emission_angle_deg": -30.0,
+      "direction": {"x": 0.8660254037844387, "y": -0.49999999999999994},
+      "status": "aperture_blocked",
+      "reason": "光线在第 0 个界面的交点切向偏移 -1.1547005383792512 越出口径（半宽 0.5），追迹停止",
+      "failed_interface_index": 0,
+      "tangent_offset": -1.1547005383792512,
+      "observation_point": null
+    },
+    {
+      "emission_angle_deg": 0.0,
+      "direction": {"x": 1.0, "y": 0.0},
+      "status": "completed",
+      "reason": null,
+      "failed_interface_index": null,
+      "tangent_offset": null,
+      "observation_point": {"x": 10.0, "y": 0.0}
+    },
+    {
+      "emission_angle_deg": 30.0,
+      "direction": {"x": 0.8660254037844387, "y": 0.49999999999999994},
+      "status": "aperture_blocked",
+      "reason": "光线在第 0 个界面的交点切向偏移 1.1547005383792512 越出口径（半宽 0.5），追迹停止",
+      "failed_interface_index": 0,
+      "tangent_offset": 1.1547005383792512,
+      "observation_point": null
+    }
+  ]
+}
+```
+
+- `ray_count`：实际追迹的光线数（等于 `sample_count`）；`hit_count`：完整通过全部界面且与观察线有前向交点的光线数。
+- `rays[]` 按发射角从 `-a` 到 `+a` 排列，每条含 `emission_angle_deg`、`direction`（归一化发射方向）、`status`（`completed` / `aperture_blocked` / `no_intersection` / `total_internal_reflection`）、`reason`（停止原因，完成为 `null`）。
+- `failed_interface_index`：首个失败界面的序号（从 0 起），完整穿过全部界面时为 `null`；`tangent_offset`：该失败界面交点相对界面点沿切向量 `t = (-ny, nx)` 的有符号偏移，无交点（`no_intersection`）时为 `null`。
+- `observation_point`：仅完整通过且出射段与观察线存在前向交点时非空。
+- 参数校验失败（如 `half_width ≤ 0`、缺失 `half_width` 字段、半角/采样数越界）返回 `422`。
 
 ## 功率评估
 
@@ -550,7 +631,7 @@ curl -X POST http://localhost:8000/api/focus-searches \
 ```
 app/
   main.py       FastAPI 路由与生命周期（启动时建库）
-  geometry.py   二维求交、斯涅尔折射、方向采样、光斑质心/RMS、菲涅耳 s/p 透过率与功率加权质心、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）
+  geometry.py   二维求交、斯涅尔折射、方向采样、光斑质心/RMS、有限口径界面追迹（切向偏移口径裁剪）、菲涅耳 s/p 透过率与功率加权质心、波前光程与等权最小二乘直线拟合、瞄准求解（扫描+二分）、装调灵敏度（逐界面法线 ±扰动与中心差分）、焦点搜索（观察线沿法线平移扫描 + 低谷黄金分割细化）
   comparison.py 两条已保存追迹的状态与分段对齐比较（统一浮点容差、缺段报告）
   db.py         SQLite 持久化（traces / segments 两表）
   schemas.py    Pydantic 请求 / 响应模型

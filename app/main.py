@@ -7,6 +7,10 @@ GET  /api/traces/{trace_id}           按编号查询完整追迹（含各段交
 GET  /api/traces/{trace_id}/segments/{seg_index}  按编号查询某一段
 POST /api/beam-evaluations            以中心方向为轴对称采样多条光线，返回每条光线
                                       的发射角、追迹状态、观察线交点及质心/RMS 半径
+POST /api/aperture-beam-evaluations   复用扇形采样与顺序界面追迹，每个界面另收
+                                      正的口径半宽，交点越出口径即终止
+                                      （aperture_blocked），返回每条光线的状态、
+                                      首个失败界面序号、该处切向偏移与光斑统计
 POST /api/power-evaluations           复用光束采样与追迹，按菲涅耳公式逐界面累乘
                                       s/p 透过率，返回各光线功率与功率加权质心
 POST /api/wavefront-evaluations       复用光束采样与追迹，计算各光线到观察线的
@@ -42,12 +46,15 @@ from .geometry import (
     ray_transmittance,
     sample_directions,
     trace_ray,
+    trace_ray_apertured,
     weighted_centroid,
 )
 from .schemas import (
     AimRequest,
     AimSolutionOut,
     AlignmentSensitivityOut,
+    ApertureBeamEvaluationOut,
+    ApertureBeamRequest,
     BeamEvaluationOut,
     BeamRequest,
     FocusSearchOut,
@@ -188,6 +195,72 @@ def evaluate_beam(req: BeamRequest) -> dict:
                 "direction": {"x": direction[0], "y": direction[1]},
                 "status": status,
                 "reason": reason,
+                "observation_point": (
+                    None
+                    if observation_point is None
+                    else {"x": observation_point[0], "y": observation_point[1]}
+                ),
+            }
+        )
+
+    stats = centroid_and_rms(hit_points)
+    return {
+        "half_angle_deg": req.half_angle_deg,
+        "sample_count": req.sample_count,
+        "ray_count": len(rays_out),
+        "hit_count": len(hit_points),
+        "centroid": None if stats is None else {"x": stats[0][0], "y": stats[0][1]},
+        "rms_radius": None if stats is None else stats[1],
+        "rays": rays_out,
+    }
+
+
+@app.post("/api/aperture-beam-evaluations", response_model=ApertureBeamEvaluationOut)
+def evaluate_aperture_beam(req: ApertureBeamRequest) -> dict:
+    """扇形采样光线逐界面顺序追迹带有限口径的界面，并评估观察线光斑。
+
+    沿用光束评估的扇形采样、顺序界面追迹与观察线输入，区别在于每个界面另收
+    正的口径半宽：界面有效区以 point 为中心，沿单位法线逆时针旋转 90° 所得
+    切向量展开，交点切向偏移绝对值不大于半宽（边界算通过）才允许折射。
+
+    逐条光线按界面顺序处理，前向交点不存在、越出口径或全反射时在首个失败
+    界面终止（状态分别为 no_intersection / aperture_blocked /
+    total_internal_reflection），不再计算后续界面；越出口径时返回该界面的
+    切向偏移，无交点时偏移为 null。仅完整通过全部界面且出射段前向命中观察线
+    的光线参与命中数、质心与 RMS 半径统计；无命中时命中数为 0、质心与 RMS
+    半径为 null。该接口为即时计算，结果不写入数据库。
+    """
+    interfaces = [
+        (itf.point.as_tuple(), itf.normal.as_tuple(), itf.n_next, itf.half_width)
+        for itf in req.interfaces
+    ]
+    start = req.start.as_tuple()
+
+    rays_out: list[dict] = []
+    hit_points: list[tuple[float, float]] = []
+    for angle, direction in sample_directions(
+        req.center_direction.as_tuple(), req.half_angle_deg, req.sample_count
+    ):
+        segments, status, reason, failed_idx, offset = trace_ray_apertured(
+            start, direction, req.n_start, interfaces
+        )
+        observation_point = None
+        if status == "completed":
+            observation_point = observation_intersection(
+                segments,
+                req.observation_line.point.as_tuple(),
+                req.observation_line.normal.as_tuple(),
+            )
+            if observation_point is not None:
+                hit_points.append(observation_point)
+        rays_out.append(
+            {
+                "emission_angle_deg": angle,
+                "direction": {"x": direction[0], "y": direction[1]},
+                "status": status,
+                "reason": reason,
+                "failed_interface_index": failed_idx,
+                "tangent_offset": offset,
                 "observation_point": (
                     None
                     if observation_point is None
