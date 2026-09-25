@@ -308,6 +308,80 @@ def trace_ray(
     return segments, "completed", None
 
 
+def trace_ray_aperture(
+    start: tuple[float, float],
+    direction: tuple[float, float],
+    n_start: float,
+    interfaces: list[
+        tuple[tuple[float, float], tuple[float, float], float, float]
+    ],
+) -> tuple[list[SegmentResult], str, str | None, int | None, float | None]:
+    """依次对每个界面做前向求交、口径检查并折射（有限口径追迹）。
+
+    interfaces: 按顺序排列的 (point, normal, n_next, half_width)，half_width
+    为正的口径半宽。界面有效区以 point 为中心、沿法线逆时针旋转 90° 所得
+    单位切向量展开：切向偏移 = (交点 - point) · 切向量，其绝对值不大于
+    half_width 时才允许折射（边界算通过）。
+
+    前向交点不存在、越出口径或全反射时在首个失败界面终止，不再计算后续
+    界面。返回 (segments, status, reason, failed_interface_index,
+    tangential_offset)，status ∈ completed / total_internal_reflection /
+    no_intersection / aperture_blocked；failed_interface_index 为首个失败
+    界面序号（completed 时为 None）；tangential_offset 为该处切向偏移
+    （无交点或 completed 时为 None）。
+    """
+    origin = (float(start[0]), float(start[1]))
+    d = normalize(direction)
+    n_current = float(n_start)
+    segments: list[SegmentResult] = []
+
+    for idx, (point, normal, n_next, half_width) in enumerate(interfaces):
+        nrm = normalize(normal)
+        hit = _intersect_line(origin, d, point, nrm)
+        if hit is None:
+            reason = (
+                f"光线与第 {idx} 个界面平行，或交点位于光线反方向，追迹停止"
+            )
+            segments.append(
+                SegmentResult(origin, d, n_current, None, "no_intersection", None)
+            )
+            return segments, "no_intersection", reason, idx, None
+
+        tangent = (-nrm[1], nrm[0])  # 法线逆时针旋转 90° 得单位切向量
+        offset = _dot((hit[0] - point[0], hit[1] - point[1]), tangent)
+        if abs(offset) > half_width:
+            reason = (
+                f"光线在第 {idx} 个界面的切向偏移 {offset} 越出口径半宽 "
+                f"{half_width}，追迹停止"
+            )
+            segments.append(
+                SegmentResult(origin, d, n_current, hit, "aperture_blocked", n_next)
+            )
+            return segments, "aperture_blocked", reason, idx, offset
+
+        new_dir = _refract(d, nrm, n_current, n_next)
+        if new_dir is None:
+            reason = (
+                f"在第 {idx} 个界面发生全反射：n1={n_current} -> n2={n_next}，"
+                f"入射角超过临界角，追迹停止"
+            )
+            segments.append(
+                SegmentResult(
+                    origin, d, n_current, hit, "total_internal_reflection", n_next
+                )
+            )
+            return segments, "total_internal_reflection", reason, idx, offset
+
+        segments.append(SegmentResult(origin, d, n_current, hit, "refraction", n_next))
+        origin = hit
+        d = new_dir
+        n_current = n_next
+
+    # 穿过所有界面，最后一段出射
+    segments.append(SegmentResult(origin, d, n_current, None, None, None))
+    return segments, "completed", None, None, None
+
+
 def _rotate_normal(
     normal: tuple[float, float], angle_deg: float
 ) -> tuple[float, float]:

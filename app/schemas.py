@@ -176,6 +176,44 @@ class BeamEvaluationOut(BaseModel):
     rays: list[BeamRayOut]
 
 
+class ApertureInterfaceIn(InterfaceIn):
+    """带口径的界面：在界面基础上增加正的口径半宽。
+
+    界面有效区以 point 为中心，沿法线逆时针旋转 90° 所得单位切向量展开；
+    交点切向偏移绝对值不大于 half_width 时允许通过（边界算通过）。
+    """
+
+    half_width: float = Field(gt=0, description="口径半宽，必须为正")
+
+
+class ApertureBeamRequest(BeamRequest):
+    """有限口径光束评估请求：在光束请求基础上为每个界面增加正的口径半宽。"""
+
+    interfaces: list[ApertureInterfaceIn] = Field(default_factory=list)
+
+
+class ApertureRayOut(BaseModel):
+    """单条光线的有限口径追迹结果：状态、首个失败界面序号与该处切向偏移。"""
+
+    emission_angle_deg: float
+    direction: Vec2
+    status: str
+    reason: str | None
+    failed_interface_index: int | None
+    tangential_offset: float | None
+    observation_point: Vec2 | None
+
+
+class ApertureBeamEvaluationOut(BaseModel):
+    half_angle_deg: float
+    sample_count: int
+    ray_count: int
+    hit_count: int
+    centroid: Vec2 | None
+    rms_radius: float | None
+    rays: list[ApertureRayOut]
+
+
 class PowerRequest(BeamRequest):
     """功率评估请求：在光束请求基础上增加 s 偏振入射功率占比。
 
